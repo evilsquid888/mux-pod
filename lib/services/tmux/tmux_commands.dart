@@ -323,16 +323,16 @@ class TmuxCommands {
 
   /// 引数をエスケープ
   static String _escapeArg(String arg) {
+    // 改行・制御文字を含む引数は拒否（コマンドインジェクション防止）
+    if (arg.contains(RegExp(r'[\n\r\x00]'))) {
+      throw ArgumentError('Argument contains illegal characters (newline or null)');
+    }
+
     // シェルの特殊文字をエスケープ
-    // 特殊文字: スペース、クォート、バックスラッシュ、変数展開、バッククォート、その他
+    // シングルクォートでラップ（最も安全：シェル変数展開・バッククォート展開なし）
     if (arg.contains(RegExp(r'[\s"' "'" r'\\$`!{}\[\]<>|&;()]'))) {
-      // ダブルクォートでラップし、内部の特殊文字をエスケープ
-      final escaped = arg
-          .replaceAll(r'\', r'\\')
-          .replaceAll('"', r'\"')
-          .replaceAll(r'$', r'\$')
-          .replaceAll('`', r'\`');
-      return '"$escaped"';
+      final escaped = arg.replaceAll("'", "'\\''");
+      return "'$escaped'";
     }
     return arg;
   }

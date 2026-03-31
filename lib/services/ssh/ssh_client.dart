@@ -30,6 +30,12 @@ class SshAuthenticationError implements Exception {
   String toString() => 'SshAuthenticationError: $message${cause != null ? ' ($cause)' : ''}';
 }
 
+/// ホスト鍵検証コールバック
+///
+/// ホスト鍵を受け取り、接続を許可する場合は true を返す。
+/// nullの場合はすべてのホスト鍵を拒否する（安全側に倒す）。
+typedef HostKeyVerifyHandler = Future<bool> Function(String hostKey);
+
 /// SSH接続オプション
 class SshConnectOptions {
   /// パスワード認証時のパスワード
@@ -47,12 +53,19 @@ class SshConnectOptions {
   /// 接続タイムアウト（秒）
   final int timeout;
 
+  /// ホスト鍵検証コールバック（MITM防止）
+  ///
+  /// nullの場合はログに警告を出力し、接続を許可する（後方互換性のため）。
+  /// 将来的にはnullの場合に接続を拒否するよう変更予定。
+  final HostKeyVerifyHandler? onVerifyHostKey;
+
   const SshConnectOptions({
     this.password,
     this.privateKey,
     this.passphrase,
     this.tmuxPath,
     this.timeout = 30,
+    this.onVerifyHostKey,
   });
 }
 
@@ -198,6 +211,13 @@ class SshClient {
         timeout: Duration(seconds: options.timeout),
       );
 
+      // ホスト鍵検証ハンドラ
+      final hostKeyHandler = options.onVerifyHostKey;
+      if (hostKeyHandler == null) {
+        debugPrint('WARNING: No host key verification callback provided. '
+            'Connection is vulnerable to MITM attacks.');
+      }
+
       // 認証方式に応じたクライアント作成
       if (options.privateKey != null) {
         // 鍵認証
@@ -206,6 +226,7 @@ class SshClient {
           username: username,
           identities: _parsePrivateKey(options.privateKey!, options.passphrase),
           onAuthenticated: _onAuthenticated,
+          onVerifyHostKey: hostKeyHandler,
         );
       } else if (options.password != null) {
         // パスワード認証
@@ -214,6 +235,7 @@ class SshClient {
           username: username,
           onPasswordRequest: () => options.password!,
           onAuthenticated: _onAuthenticated,
+          onVerifyHostKey: hostKeyHandler,
         );
       } else {
         throw SshAuthenticationError('No authentication method provided');
@@ -229,7 +251,7 @@ class SshClient {
       if (options.tmuxPath != null && options.tmuxPath!.isNotEmpty) {
         // ユーザー指定パスの存在確認
         final verifyExitCode = await _withExecLock(() async {
-          final session = await _client!.execute('test -x ${options.tmuxPath}');
+          final session = await _client!.execute('test -x ${_shellQuote(options.tmuxPath!)}');
           await session.stdout.drain();
           await session.stderr.drain();
           final code = session.exitCode;
@@ -267,6 +289,12 @@ class SshClient {
       await _cleanup();
       throw SshConnectionError(_lastError!, e);
     }
+  }
+
+  /// シェルコマンドインジェクションを防ぐためにシングルクォートでエスケープ
+  static String _shellQuote(String arg) {
+    // Single-quote wrapping: replace ' with '\'' inside
+    return "'${arg.replaceAll("'", "'\\''")}'";
   }
 
   /// 接続パラメータをバリデート
