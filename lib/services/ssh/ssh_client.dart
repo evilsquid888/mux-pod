@@ -212,11 +212,15 @@ class SshClient {
       );
 
       // ホスト鍵検証ハンドラ
-      final hostKeyHandler = options.onVerifyHostKey;
-      if (hostKeyHandler == null) {
+      final rawHostKeyHandler = options.onVerifyHostKey;
+      if (rawHostKeyHandler == null) {
         debugPrint('WARNING: No host key verification callback provided. '
             'Connection is vulnerable to MITM attacks.');
       }
+      // Wrap to match dartssh2's (String, Uint8List) signature
+      final hostKeyHandler = rawHostKeyHandler != null
+          ? (String host, Uint8List key) => rawHostKeyHandler(host)
+          : null;
 
       // 認証方式に応じたクライアント作成
       if (options.privateKey != null) {
