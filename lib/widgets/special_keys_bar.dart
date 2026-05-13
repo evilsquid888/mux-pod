@@ -24,6 +24,9 @@ class SpecialKeysBar extends StatefulWidget {
   /// DirectInputモードのトグルコールバック
   final VoidCallback? onDirectInputToggle;
 
+  /// 画像転送ボタンが押された時のコールバック
+  final VoidCallback? onImagePickRequested;
+
   const SpecialKeysBar({
     super.key,
     required this.onKeyPressed,
@@ -32,6 +35,7 @@ class SpecialKeysBar extends StatefulWidget {
     this.hapticFeedback = true,
     this.directInputEnabled = false,
     this.onDirectInputToggle,
+    this.onImagePickRequested,
   });
 
   @override
@@ -110,8 +114,40 @@ class _SpecialKeysBarState extends State<SpecialKeysBar> {
     _isComposing = value.composing.isValid && !value.composing.isCollapsed;
 
     if (_isComposing) {
-      // 変換中: composingテキストを記録（iOS重複検出用）して送信しない
+      // Record composing text for iOS duplicate detection
       _lastComposingText = text.replaceAll(_sentinel, '');
+
+      // Samsung IME composing workaround:
+      // Samsung (and some Android IMEs) treat English letters as composing,
+      // so composing=false may NEVER arrive while the user keeps typing.
+      // When a modifier (CTRL/ALT) is active, intercept the first composing
+      // character immediately instead of waiting for composing to end.
+      // Guards:
+      //   - length == 1: only the first composing char (avoids accumulated repeats)
+      //   - ASCII letter regex: don't intercept Korean (ㅊ) or other non-ASCII composing
+      if ((_ctrlPressed || _altPressed) && _lastComposingText!.length == 1) {
+        final char = _lastComposingText!;
+        if (RegExp(r'^[A-Za-z]$').hasMatch(char)) {
+          if (widget.hapticFeedback) {
+            HapticFeedback.lightImpact();
+          }
+          final List<String> modifiers = [];
+          if (_ctrlPressed) {
+            modifiers.add('C');
+            setState(() => _ctrlPressed = false);
+          }
+          if (_altPressed) {
+            modifiers.add('M');
+            setState(() => _altPressed = false);
+          }
+          final prefix = modifiers.join('-');
+          widget.onSpecialKeyPressed('$prefix-${char.toLowerCase()}');
+          _lastComposingText = null;
+          _resetToSentinel();
+          return;
+        }
+      }
+
       return;
     }
 
@@ -145,13 +181,26 @@ class _SpecialKeysBarState extends State<SpecialKeysBar> {
       }
       _lastComposingText = null;
 
-      // CTRLボタンが押されている場合はCtrl+キーとして送信
-      if (_ctrlPressed && textToSend.length == 1 && RegExp(r'^[A-Za-z]$').hasMatch(textToSend)) {
+      // Send modifier+key when CTRL/ALT is active (non-composing path)
+      // This handles IMEs that commit without composing (e.g. Gboard English)
+      // tmux format: C-c (Ctrl+C), M-a (Alt+A), C-M-x (Ctrl+Alt+X)
+      if ((_ctrlPressed || _altPressed) &&
+          textToSend.length == 1 &&
+          RegExp(r'^[A-Za-z]$').hasMatch(textToSend)) {
         if (widget.hapticFeedback) {
           HapticFeedback.lightImpact();
         }
-        widget.onSpecialKeyPressed('C-${textToSend.toLowerCase()}');
-        setState(() => _ctrlPressed = false);
+        final List<String> modifiers = [];
+        if (_ctrlPressed) {
+          modifiers.add('C');
+          setState(() => _ctrlPressed = false);
+        }
+        if (_altPressed) {
+          modifiers.add('M');
+          setState(() => _altPressed = false);
+        }
+        final prefix = modifiers.join('-');
+        widget.onSpecialKeyPressed('$prefix-${textToSend.toLowerCase()}');
       } else {
         widget.onKeyPressed(textToSend);
       }
@@ -513,6 +562,11 @@ class _SpecialKeysBarState extends State<SpecialKeysBar> {
           const SizedBox(width: 2),
           _buildArrowButton(Icons.arrow_right, 'Right'),
           const SizedBox(width: 8),
+          // 画像転送ボタン
+          if (widget.onImagePickRequested != null) ...[
+            _buildImageTransferButton(),
+            const SizedBox(width: 2),
+          ],
           // DirectInputモードトグルボタン
           _buildDirectInputToggle(),
           // DirectInput有効時: 数字キー(1-4)を右寄せで表示
@@ -816,6 +870,34 @@ class _SpecialKeysBarState extends State<SpecialKeysBar> {
         ),
         child: Icon(
           icon,
+          size: 16,
+          color: colorScheme.onSurface,
+        ),
+      ),
+    );
+  }
+
+  /// 画像転送ボタン
+  Widget _buildImageTransferButton() {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final colorScheme = Theme.of(context).colorScheme;
+    return GestureDetector(
+      onTapDown: (_) {
+        if (widget.hapticFeedback) {
+          HapticFeedback.lightImpact();
+        }
+      },
+      onTap: widget.onImagePickRequested,
+      child: Container(
+        width: 36,
+        height: 36,
+        decoration: BoxDecoration(
+          color: isDark ? DesignColors.keyBackground : DesignColors.keyBackgroundLight,
+          borderRadius: BorderRadius.circular(4),
+          border: Border.all(color: colorScheme.outline.withValues(alpha: 0.2)),
+        ),
+        child: Icon(
+          Icons.image_outlined,
           size: 16,
           color: colorScheme.onSurface,
         ),

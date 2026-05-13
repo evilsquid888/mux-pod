@@ -160,6 +160,7 @@ class TmuxCommands {
         '#{pane_current_command}$delimiter'
         '#{cursor_x}$delimiter'
         '#{cursor_y}$delimiter'
+        '#{pane_current_path}$delimiter'
         '#{window_flags}'
         '"';
   }
@@ -201,6 +202,23 @@ class TmuxCommands {
   /// ペインをズーム/アンズーム
   static String resizePane(String paneId, {bool zoom = true}) {
     return 'tmux resize-pane -t ${_escapeArg(paneId)} ${zoom ? '-Z' : '-z'}';
+  }
+
+  /// ペインを指定サイズにリサイズする
+  /// cols/rowsはオプション（片方のみ指定可、tmuxは未指定の方を変更しない）
+  static String resizePaneToSize(String paneId, {int? cols, int? rows}) {
+    final args = <String>['-t', _escapeArg(paneId)];
+    if (cols != null) args.addAll(['-x', '$cols']);
+    if (rows != null) args.addAll(['-y', '$rows']);
+    return 'tmux resize-pane ${args.join(' ')}';
+  }
+
+  /// ウィンドウを指定サイズにリサイズする（tmux 2.9+必須）
+  static String resizeWindow(String target, {int? cols, int? rows}) {
+    final args = <String>['-t', _escapeArg(target)];
+    if (cols != null) args.addAll(['-x', '$cols']);
+    if (rows != null) args.addAll(['-y', '$rows']);
+    return 'tmux resize-window ${args.join(' ')}';
   }
 
   // ===== 入力・キー送信 =====
@@ -346,6 +364,15 @@ class TmuxCommands {
   static String pipe(List<String> commands) {
     return commands.join(' | ');
   }
+}
+
+/// ペイン分割方向
+enum SplitDirection {
+  /// 右に分割（左右に並べる） - tmux split-window -h
+  horizontal,
+
+  /// 下に分割（上下に並べる） - tmux split-window -v
+  vertical,
 }
 
 /// tmuxレイアウト

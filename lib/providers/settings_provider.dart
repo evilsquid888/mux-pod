@@ -1,6 +1,8 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../services/settings_migration.dart';
+
 /// アプリ設定
 class AppSettings {
   final bool darkMode;
@@ -12,7 +14,9 @@ class AppSettings {
   final bool keepScreenOn;
   final int scrollbackLines;
   final double minFontSize;
-  final bool autoFitEnabled;
+
+  /// 表示調整モード: 'none', 'autoFit', 'autoResize'
+  final String adjustMode;
 
   /// DirectInputモード（入力した文字を即座にターミナルに送信）
   final bool directInputEnabled;
@@ -22,6 +26,36 @@ class AppSettings {
 
   /// ペインナビゲーション方向の反転
   final bool invertPaneNavigation;
+
+  // --- キーオーバーレイ設定 ---
+  /// キーオーバーレイ全体ON/OFF
+  final bool showKeyOverlay;
+
+  /// キーオーバーレイ: 修飾キー組み合わせ（Ctrl+x, Alt+x, Shift+x）
+  final bool keyOverlayModifier;
+
+  /// キーオーバーレイ: 単独特殊キー（ESC, TAB, ENTER, S-Enter）
+  final bool keyOverlaySpecial;
+
+  /// キーオーバーレイ: 矢印キー
+  final bool keyOverlayArrow;
+
+  /// キーオーバーレイ: ショートカットキー（/, -, 1-4）
+  final bool keyOverlayShortcut;
+
+  /// キーオーバーレイ: 表示位置
+  final String keyOverlayPosition;
+
+  // --- 画像転送設定 ---
+  final String imageRemotePath;
+  final String imageOutputFormat;
+  final int imageJpegQuality;
+  final String imageResizePreset; // 'original'/'small'/'medium'/'large'/'custom'
+  final int imageMaxWidth;
+  final int imageMaxHeight;
+  final String imagePathFormat;
+  final bool imageAutoEnter;
+  final bool imageBracketedPaste;
 
   const AppSettings({
     this.darkMode = true,
@@ -33,11 +67,29 @@ class AppSettings {
     this.keepScreenOn = true,
     this.scrollbackLines = 10000,
     this.minFontSize = 8.0,
-    this.autoFitEnabled = true,
+    this.adjustMode = 'autoFit',
     this.directInputEnabled = false,
     this.showTerminalCursor = true,
     this.invertPaneNavigation = false,
+    this.showKeyOverlay = true,
+    this.keyOverlayModifier = true,
+    this.keyOverlaySpecial = true,
+    this.keyOverlayArrow = true,
+    this.keyOverlayShortcut = true,
+    this.keyOverlayPosition = 'aboveKeyboard',
+    this.imageRemotePath = '/tmp/muxpod/',
+    this.imageOutputFormat = 'original',
+    this.imageJpegQuality = 85,
+    this.imageResizePreset = 'original',
+    this.imageMaxWidth = 1920,
+    this.imageMaxHeight = 1080,
+    this.imagePathFormat = '{path}',
+    this.imageAutoEnter = false,
+    this.imageBracketedPaste = false,
   });
+
+  bool get isAutoFit => adjustMode == 'autoFit';
+  bool get isAutoResize => adjustMode == 'autoResize';
 
   AppSettings copyWith({
     bool? darkMode,
@@ -49,10 +101,25 @@ class AppSettings {
     bool? keepScreenOn,
     int? scrollbackLines,
     double? minFontSize,
-    bool? autoFitEnabled,
+    String? adjustMode,
     bool? directInputEnabled,
     bool? showTerminalCursor,
     bool? invertPaneNavigation,
+    bool? showKeyOverlay,
+    bool? keyOverlayModifier,
+    bool? keyOverlaySpecial,
+    bool? keyOverlayArrow,
+    bool? keyOverlayShortcut,
+    String? keyOverlayPosition,
+    String? imageRemotePath,
+    String? imageOutputFormat,
+    int? imageJpegQuality,
+    String? imageResizePreset,
+    int? imageMaxWidth,
+    int? imageMaxHeight,
+    String? imagePathFormat,
+    bool? imageAutoEnter,
+    bool? imageBracketedPaste,
   }) {
     return AppSettings(
       darkMode: darkMode ?? this.darkMode,
@@ -64,10 +131,25 @@ class AppSettings {
       keepScreenOn: keepScreenOn ?? this.keepScreenOn,
       scrollbackLines: scrollbackLines ?? this.scrollbackLines,
       minFontSize: minFontSize ?? this.minFontSize,
-      autoFitEnabled: autoFitEnabled ?? this.autoFitEnabled,
+      adjustMode: adjustMode ?? this.adjustMode,
       directInputEnabled: directInputEnabled ?? this.directInputEnabled,
       showTerminalCursor: showTerminalCursor ?? this.showTerminalCursor,
       invertPaneNavigation: invertPaneNavigation ?? this.invertPaneNavigation,
+      showKeyOverlay: showKeyOverlay ?? this.showKeyOverlay,
+      keyOverlayModifier: keyOverlayModifier ?? this.keyOverlayModifier,
+      keyOverlaySpecial: keyOverlaySpecial ?? this.keyOverlaySpecial,
+      keyOverlayArrow: keyOverlayArrow ?? this.keyOverlayArrow,
+      keyOverlayShortcut: keyOverlayShortcut ?? this.keyOverlayShortcut,
+      keyOverlayPosition: keyOverlayPosition ?? this.keyOverlayPosition,
+      imageRemotePath: imageRemotePath ?? this.imageRemotePath,
+      imageOutputFormat: imageOutputFormat ?? this.imageOutputFormat,
+      imageJpegQuality: imageJpegQuality ?? this.imageJpegQuality,
+      imageResizePreset: imageResizePreset ?? this.imageResizePreset,
+      imageMaxWidth: imageMaxWidth ?? this.imageMaxWidth,
+      imageMaxHeight: imageMaxHeight ?? this.imageMaxHeight,
+      imagePathFormat: imagePathFormat ?? this.imagePathFormat,
+      imageAutoEnter: imageAutoEnter ?? this.imageAutoEnter,
+      imageBracketedPaste: imageBracketedPaste ?? this.imageBracketedPaste,
     );
   }
 }
@@ -83,10 +165,25 @@ class SettingsNotifier extends Notifier<AppSettings> {
   static const String _keepScreenOnKey = 'settings_keep_screen_on';
   static const String _scrollbackKey = 'settings_scrollback';
   static const String _minFontSizeKey = 'settings_min_font_size';
-  static const String _autoFitEnabledKey = 'settings_auto_fit_enabled';
+  static const String _adjustModeKey = 'settings_adjust_mode';
   static const String _directInputEnabledKey = 'settings_direct_input_enabled';
   static const String _showTerminalCursorKey = 'settings_show_terminal_cursor';
   static const String _invertPaneNavKey = 'settings_invert_pane_nav';
+  static const String _imageRemotePathKey = 'settings_image_remote_path';
+  static const String _imageOutputFormatKey = 'settings_image_output_format';
+  static const String _imageJpegQualityKey = 'settings_image_jpeg_quality';
+  static const String _imageResizePresetKey = 'settings_image_resize_preset';
+  static const String _imageMaxWidthKey = 'settings_image_max_width';
+  static const String _imageMaxHeightKey = 'settings_image_max_height';
+  static const String _imagePathFormatKey = 'settings_image_path_format';
+  static const String _imageAutoEnterKey = 'settings_image_auto_enter';
+  static const String _imageBracketedPasteKey = 'settings_image_bracketed_paste';
+  static const String _showKeyOverlayKey = 'settings_show_key_overlay';
+  static const String _keyOverlayModifierKey = 'settings_key_overlay_modifier';
+  static const String _keyOverlaySpecialKey = 'settings_key_overlay_special';
+  static const String _keyOverlayArrowKey = 'settings_key_overlay_arrow';
+  static const String _keyOverlayShortcutKey = 'settings_key_overlay_shortcut';
+  static const String _keyOverlayPositionKey = 'settings_key_overlay_position';
 
   @override
   AppSettings build() {
@@ -96,6 +193,7 @@ class SettingsNotifier extends Notifier<AppSettings> {
 
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
+    await SettingsMigrationRunner.run(prefs);
 
     state = AppSettings(
       darkMode: prefs.getBool(_darkModeKey) ?? true,
@@ -107,10 +205,25 @@ class SettingsNotifier extends Notifier<AppSettings> {
       keepScreenOn: prefs.getBool(_keepScreenOnKey) ?? true,
       scrollbackLines: prefs.getInt(_scrollbackKey) ?? 10000,
       minFontSize: prefs.getDouble(_minFontSizeKey) ?? 8.0,
-      autoFitEnabled: prefs.getBool(_autoFitEnabledKey) ?? true,
+      adjustMode: prefs.getString(_adjustModeKey) ?? 'autoFit',
       directInputEnabled: prefs.getBool(_directInputEnabledKey) ?? false,
       showTerminalCursor: prefs.getBool(_showTerminalCursorKey) ?? true,
       invertPaneNavigation: prefs.getBool(_invertPaneNavKey) ?? false,
+      showKeyOverlay: prefs.getBool(_showKeyOverlayKey) ?? true,
+      keyOverlayModifier: prefs.getBool(_keyOverlayModifierKey) ?? true,
+      keyOverlaySpecial: prefs.getBool(_keyOverlaySpecialKey) ?? true,
+      keyOverlayArrow: prefs.getBool(_keyOverlayArrowKey) ?? true,
+      keyOverlayShortcut: prefs.getBool(_keyOverlayShortcutKey) ?? true,
+      keyOverlayPosition: prefs.getString(_keyOverlayPositionKey) ?? 'aboveKeyboard',
+      imageRemotePath: prefs.getString(_imageRemotePathKey) ?? '/tmp/muxpod/',
+      imageOutputFormat: prefs.getString(_imageOutputFormatKey) ?? 'original',
+      imageJpegQuality: prefs.getInt(_imageJpegQualityKey) ?? 85,
+      imageResizePreset: prefs.getString(_imageResizePresetKey) ?? 'original',
+      imageMaxWidth: prefs.getInt(_imageMaxWidthKey) ?? 1920,
+      imageMaxHeight: prefs.getInt(_imageMaxHeightKey) ?? 1080,
+      imagePathFormat: prefs.getString(_imagePathFormatKey) ?? '{path}',
+      imageAutoEnter: prefs.getBool(_imageAutoEnterKey) ?? false,
+      imageBracketedPaste: prefs.getBool(_imageBracketedPasteKey) ?? false,
     );
   }
 
@@ -181,10 +294,10 @@ class SettingsNotifier extends Notifier<AppSettings> {
     await _saveSetting(_minFontSizeKey, value);
   }
 
-  /// 自動フィットを設定
-  Future<void> setAutoFitEnabled(bool value) async {
-    state = state.copyWith(autoFitEnabled: value);
-    await _saveSetting(_autoFitEnabledKey, value);
+  /// 表示調整モードを設定
+  Future<void> setAdjustMode(String value) async {
+    state = state.copyWith(adjustMode: value);
+    await _saveSetting(_adjustModeKey, value);
   }
 
   /// DirectInputモードを設定
@@ -208,6 +321,83 @@ class SettingsNotifier extends Notifier<AppSettings> {
   Future<void> setInvertPaneNavigation(bool value) async {
     state = state.copyWith(invertPaneNavigation: value);
     await _saveSetting(_invertPaneNavKey, value);
+  }
+
+  // --- キーオーバーレイ設定のsetter ---
+  Future<void> setShowKeyOverlay(bool value) async {
+    state = state.copyWith(showKeyOverlay: value);
+    await _saveSetting(_showKeyOverlayKey, value);
+  }
+
+  Future<void> setKeyOverlayModifier(bool value) async {
+    state = state.copyWith(keyOverlayModifier: value);
+    await _saveSetting(_keyOverlayModifierKey, value);
+  }
+
+  Future<void> setKeyOverlaySpecial(bool value) async {
+    state = state.copyWith(keyOverlaySpecial: value);
+    await _saveSetting(_keyOverlaySpecialKey, value);
+  }
+
+  Future<void> setKeyOverlayArrow(bool value) async {
+    state = state.copyWith(keyOverlayArrow: value);
+    await _saveSetting(_keyOverlayArrowKey, value);
+  }
+
+  Future<void> setKeyOverlayShortcut(bool value) async {
+    state = state.copyWith(keyOverlayShortcut: value);
+    await _saveSetting(_keyOverlayShortcutKey, value);
+  }
+
+  Future<void> setKeyOverlayPosition(String value) async {
+    state = state.copyWith(keyOverlayPosition: value);
+    await _saveSetting(_keyOverlayPositionKey, value);
+  }
+
+  // --- 画像転送設定のsetter ---
+  Future<void> setImageRemotePath(String value) async {
+    state = state.copyWith(imageRemotePath: value);
+    await _saveSetting(_imageRemotePathKey, value);
+  }
+
+  Future<void> setImageOutputFormat(String value) async {
+    state = state.copyWith(imageOutputFormat: value);
+    await _saveSetting(_imageOutputFormatKey, value);
+  }
+
+  Future<void> setImageJpegQuality(int value) async {
+    state = state.copyWith(imageJpegQuality: value);
+    await _saveSetting(_imageJpegQualityKey, value);
+  }
+
+  Future<void> setImageResizePreset(String value) async {
+    state = state.copyWith(imageResizePreset: value);
+    await _saveSetting(_imageResizePresetKey, value);
+  }
+
+  Future<void> setImageMaxWidth(int value) async {
+    state = state.copyWith(imageMaxWidth: value);
+    await _saveSetting(_imageMaxWidthKey, value);
+  }
+
+  Future<void> setImageMaxHeight(int value) async {
+    state = state.copyWith(imageMaxHeight: value);
+    await _saveSetting(_imageMaxHeightKey, value);
+  }
+
+  Future<void> setImagePathFormat(String value) async {
+    state = state.copyWith(imagePathFormat: value);
+    await _saveSetting(_imagePathFormatKey, value);
+  }
+
+  Future<void> setImageAutoEnter(bool value) async {
+    state = state.copyWith(imageAutoEnter: value);
+    await _saveSetting(_imageAutoEnterKey, value);
+  }
+
+  Future<void> setImageBracketedPaste(bool value) async {
+    state = state.copyWith(imageBracketedPaste: value);
+    await _saveSetting(_imageBracketedPasteKey, value);
   }
 
   /// リロード

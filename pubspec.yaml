@@ -46,6 +46,10 @@ dependencies:
   cryptography: ^2.7.0
   pointycastle: ^3.9.1
   crypto: ^3.0.3
+  # Image transfer
+  image_picker: ^1.1.2
+  image: ^4.5.3
+  flutter_image_compress: ^2.4.0
   # Settings/notifications
   url_launcher: ^6.3.2
   # Background SSH connection maintenance
@@ -54,6 +58,8 @@ dependencies:
   wakelock_plus: ^1.2.10
   # Network connectivity monitoring
   connectivity_plus: ^6.0.0
+  path: ^1.9.1
+  intl: ^0.20.2
 
 dev_dependencies:
   flutter_test:

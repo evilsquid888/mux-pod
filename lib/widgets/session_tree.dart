@@ -1,12 +1,18 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_muxpod/services/tmux/tmux_parser.dart';
+import 'package:flutter_muxpod/widgets/tmux_tiles.dart';
 
 /// tmuxセッションツリー表示Widget
 /// 仮想スクロール対応: ListView.builder + 遅延ウィジェット生成
 class SessionTree extends StatelessWidget {
-  final List<SessionNode> sessions;
+  final List<TmuxSession> sessions;
   final String? selectedPaneId;
   final void Function(String paneId)? onPaneSelected;
   final void Function(String sessionName)? onSessionDoubleTap;
+  final void Function(TmuxPane pane)? onPaneResize;
+  final void Function(String paneId)? onPaneClose;
+  final void Function(TmuxWindow window)? onWindowResize;
+  final void Function(String sessionName, int windowIndex, String windowName, bool isLastWindow)? onWindowClose;
 
   const SessionTree({
     super.key,
@@ -14,6 +20,10 @@ class SessionTree extends StatelessWidget {
     this.selectedPaneId,
     this.onPaneSelected,
     this.onSessionDoubleTap,
+    this.onPaneResize,
+    this.onPaneClose,
+    this.onWindowResize,
+    this.onWindowClose,
   });
 
   @override
@@ -26,7 +36,6 @@ class SessionTree extends StatelessWidget {
 
     return ListView.builder(
       itemCount: sessions.length,
-      // 画面外のウィジェットを破棄してメモリ節約
       addAutomaticKeepAlives: false,
       addRepaintBoundaries: true,
       itemBuilder: (context, index) {
@@ -35,6 +44,10 @@ class SessionTree extends StatelessWidget {
           selectedPaneId: selectedPaneId,
           onPaneSelected: onPaneSelected,
           onSessionDoubleTap: onSessionDoubleTap,
+          onPaneResize: onPaneResize,
+          onPaneClose: onPaneClose,
+          onWindowResize: onWindowResize,
+          onWindowClose: onWindowClose,
         );
       },
     );
@@ -43,16 +56,24 @@ class SessionTree extends StatelessWidget {
 
 /// セッションタイル（展開状態を管理して遅延生成）
 class _SessionTile extends StatefulWidget {
-  final SessionNode session;
+  final TmuxSession session;
   final String? selectedPaneId;
   final void Function(String paneId)? onPaneSelected;
   final void Function(String sessionName)? onSessionDoubleTap;
+  final void Function(TmuxPane pane)? onPaneResize;
+  final void Function(String paneId)? onPaneClose;
+  final void Function(TmuxWindow window)? onWindowResize;
+  final void Function(String sessionName, int windowIndex, String windowName, bool isLastWindow)? onWindowClose;
 
   const _SessionTile({
     required this.session,
     this.selectedPaneId,
     this.onPaneSelected,
     this.onSessionDoubleTap,
+    this.onPaneResize,
+    this.onPaneClose,
+    this.onWindowResize,
+    this.onWindowClose,
   });
 
   @override
@@ -70,52 +91,37 @@ class _SessionTileState extends State<_SessionTile> {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onDoubleTap: () => widget.onSessionDoubleTap?.call(widget.session.name),
-      child: ExpansionTile(
-        leading: Icon(
-          Icons.folder,
-          color: widget.session.attached
-              ? Theme.of(context).colorScheme.primary
-              : null,
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return Column(
+      children: [
+        GestureDetector(
+          onDoubleTap: () => widget.onSessionDoubleTap?.call(widget.session.name),
+          child: TmuxSessionTile(
+            session: widget.session,
+            isActive: widget.session.attached,
+            onTap: () => setState(() => _isExpanded = !_isExpanded),
+            trailing: Icon(
+              _isExpanded ? Icons.expand_less : Icons.expand_more,
+              color: colorScheme.onSurface.withValues(alpha: 0.6),
+            ),
+          ),
         ),
-        title: Row(
-          children: [
-            Text(widget.session.name),
-            if (widget.session.attached)
-              Container(
-                margin: const EdgeInsets.only(left: 8),
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                decoration: BoxDecoration(
-                  color: Theme.of(context).colorScheme.primaryContainer,
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                child: Text(
-                  'attached',
-                  style: TextStyle(
-                    fontSize: 10,
-                    color: Theme.of(context).colorScheme.onPrimaryContainer,
-                  ),
-                ),
-              ),
-          ],
-        ),
-        initiallyExpanded: widget.session.attached,
-        onExpansionChanged: (expanded) {
-          setState(() => _isExpanded = expanded);
-        },
-        // 展開時のみ子ウィジェットを生成（遅延生成でメモリ節約）
-        children: _isExpanded
-            ? widget.session.windows.map((window) {
-                return _WindowTile(
-                  sessionName: widget.session.name,
-                  window: window,
-                  selectedPaneId: widget.selectedPaneId,
-                  onPaneSelected: widget.onPaneSelected,
-                );
-              }).toList()
-            : const [],
-      ),
+        if (_isExpanded)
+          ...widget.session.windows.map((window) {
+            return _WindowTile(
+              sessionName: widget.session.name,
+              window: window,
+              isLastWindow: widget.session.windows.length == 1,
+              selectedPaneId: widget.selectedPaneId,
+              onPaneSelected: widget.onPaneSelected,
+              onPaneResize: widget.onPaneResize,
+              onPaneClose: widget.onPaneClose,
+              onWindowResize: widget.onWindowResize,
+              onWindowClose: widget.onWindowClose,
+            );
+          }),
+      ],
     );
   }
 }
@@ -123,15 +129,25 @@ class _SessionTileState extends State<_SessionTile> {
 /// ウィンドウタイル（展開状態を管理して遅延生成）
 class _WindowTile extends StatefulWidget {
   final String sessionName;
-  final WindowNode window;
+  final TmuxWindow window;
+  final bool isLastWindow;
   final String? selectedPaneId;
   final void Function(String paneId)? onPaneSelected;
+  final void Function(TmuxPane pane)? onPaneResize;
+  final void Function(String paneId)? onPaneClose;
+  final void Function(TmuxWindow window)? onWindowResize;
+  final void Function(String sessionName, int windowIndex, String windowName, bool isLastWindow)? onWindowClose;
 
   const _WindowTile({
     required this.sessionName,
     required this.window,
+    required this.isLastWindow,
     this.selectedPaneId,
     this.onPaneSelected,
+    this.onPaneResize,
+    this.onPaneClose,
+    this.onWindowResize,
+    this.onWindowClose,
   });
 
   @override
@@ -151,91 +167,46 @@ class _WindowTileState extends State<_WindowTile> {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.only(left: 16),
-      child: ExpansionTile(
-        leading: Icon(
-          Icons.tab,
-          color: widget.window.active
-              ? Theme.of(context).colorScheme.secondary
-              : null,
-        ),
-        title: Text('${widget.window.index}: ${widget.window.name}'),
-        initiallyExpanded: widget.window.active,
-        onExpansionChanged: (expanded) {
-          setState(() => _isExpanded = expanded);
-        },
-        // 展開時のみ子ウィジェットを生成（遅延生成でメモリ節約）
-        children: _isExpanded
-            ? widget.window.panes.map((pane) {
-                return _buildPaneNode(context, pane);
-              }).toList()
-            : const [],
+      child: Column(
+        children: [
+          TmuxWindowTile(
+            window: widget.window,
+            isActive: widget.window.active,
+            onTap: () => setState(() => _isExpanded = !_isExpanded),
+            onResize: widget.onWindowResize != null
+                ? () => widget.onWindowResize!(widget.window)
+                : null,
+            onClose: widget.onWindowClose != null
+                ? () => widget.onWindowClose?.call(
+                      widget.sessionName,
+                      widget.window.index,
+                      widget.window.name,
+                      widget.isLastWindow,
+                    )
+                : null,
+          ),
+          if (_isExpanded)
+            ...widget.window.panes.map((pane) => _buildPaneNode(context, pane)),
+        ],
       ),
     );
   }
 
-  Widget _buildPaneNode(BuildContext context, PaneNode pane) {
-    final isSelected = pane.id == widget.selectedPaneId;
-
+  Widget _buildPaneNode(BuildContext context, TmuxPane pane) {
     return Padding(
       padding: const EdgeInsets.only(left: 32),
-      child: ListTile(
-        leading: Icon(
-          Icons.terminal,
-          color: pane.active
-              ? Theme.of(context).colorScheme.tertiary
-              : null,
-        ),
-        title: Text('Pane ${pane.index}'),
-        subtitle: Text('${pane.width}x${pane.height}'),
-        selected: isSelected,
-        selectedTileColor: Theme.of(context).colorScheme.primaryContainer.withValues(alpha: 0.3),
+      child: TmuxPaneTile(
+        pane: pane,
+        paneTitle: pane.title ?? 'Pane ${pane.index}',
+        isActive: pane.id == widget.selectedPaneId,
         onTap: () => widget.onPaneSelected?.call(pane.id),
+        onResize: widget.onPaneResize != null
+            ? () => widget.onPaneResize!(pane)
+            : null,
+        onClose: widget.onPaneClose != null
+            ? () => widget.onPaneClose!(pane.id)
+            : null,
       ),
     );
   }
-}
-
-/// セッションノード
-class SessionNode {
-  final String name;
-  final bool attached;
-  final List<WindowNode> windows;
-
-  SessionNode({
-    required this.name,
-    required this.attached,
-    required this.windows,
-  });
-}
-
-/// ウィンドウノード
-class WindowNode {
-  final int index;
-  final String name;
-  final bool active;
-  final List<PaneNode> panes;
-
-  WindowNode({
-    required this.index,
-    required this.name,
-    required this.active,
-    required this.panes,
-  });
-}
-
-/// ペインノード
-class PaneNode {
-  final int index;
-  final String id;
-  final bool active;
-  final int width;
-  final int height;
-
-  PaneNode({
-    required this.index,
-    required this.id,
-    required this.active,
-    required this.width,
-    required this.height,
-  });
 }
