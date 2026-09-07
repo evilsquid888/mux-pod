@@ -37,8 +37,8 @@ import '../../command/command_result.dart';
 import '../../sftp/sftp_service.dart';
 import '../../ssh/ssh_client.dart';
 import '../herdr_models.dart';
+import '../herdr_version.dart';
 import 'herdr_caret_helper_manifest.dart';
-import 'herdr_caret_snapshot.dart';
 
 /// helper バイナリの読み込み（asset → バイト列）。
 typedef HerdrCaretBinaryLoader = Future<Uint8List> Function(String assetPath);
@@ -171,9 +171,6 @@ class HerdrCaretHelperManager implements HerdrCaretHelperRunner {
     return data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
   }
 
-  /// サポートする Herdr protocol 番号（17 / 20 のみ）。
-  static const Set<int> supportedProtocols = kHerdrCaretSupportedProtocols;
-
   /// API socket（`herdr status --json` の `server.socket`）から
   /// client socket を導出する。
   ///
@@ -213,7 +210,7 @@ class HerdrCaretHelperManager implements HerdrCaretHelperRunner {
     final execTimeout = timeout ?? defaultRunTimeout;
 
     // protocol は helper 実行前に判定（17/20 以外は配置・実行しない）。
-    if (!supportedProtocols.contains(status.serverProtocol)) {
+    if (!isHerdrCaretProtocolSupported(status.serverProtocol)) {
       _fail(
         HerdrCaretHelperFailure.unsupportedProtocol,
         'Server protocol ${status.serverProtocol} is not supported',
@@ -373,6 +370,7 @@ class HerdrCaretHelperManager implements HerdrCaretHelperRunner {
     await _installRemote(
       sftpBytes: bytes,
       platform: platform,
+      cacheBase: base,
       remoteDir: remoteDir,
       tempPath: tempPath,
       remotePath: remotePath,
@@ -398,6 +396,7 @@ class HerdrCaretHelperManager implements HerdrCaretHelperRunner {
   Future<void> _installRemote({
     required Uint8List sftpBytes,
     required HerdrCaretHelperPlatform platform,
+    required String cacheBase,
     required String remoteDir,
     required String tempPath,
     required String remotePath,
@@ -415,6 +414,14 @@ class HerdrCaretHelperManager implements HerdrCaretHelperRunner {
     }
 
     try {
+      // SFTP mkdir is not recursive. Create the cache base and helper install
+      // hierarchy in order, including when the cache base itself is absent.
+      final cacheRoot = p.posix.normalize(cacheBase);
+      final installRoot = p.posix.join(cacheRoot, remoteInstallDir);
+      final parentRoot = p.posix.dirname(installRoot);
+      await _sftpService.ensureDirectory(sftp, cacheRoot);
+      await _sftpService.ensureDirectory(sftp, parentRoot);
+      await _sftpService.ensureDirectory(sftp, installRoot);
       await _sftpService.ensureDirectory(sftp, remoteDir);
     } catch (e) {
       _fail(
