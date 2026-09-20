@@ -77,6 +77,11 @@ import '../file_browser/file_browser_screen.dart';
 import 'package:image_picker/image_picker.dart';
 import '../settings/settings_screen.dart';
 import 'widgets/ansi_text_view.dart';
+import 'widgets/comm_error_panel.dart';
+import 'widgets/disconnect_bar.dart';
+import 'widgets/reconnect_countdown.dart';
+import 'widgets/reconnect_detail_panel.dart';
+import 'widgets/reconnect_indicators.dart';
 import 'widgets/terminal_zoom.dart';
 import '../../providers/custom_keys_provider.dart';
 import '../../services/custom_keys/custom_key_button.dart';
@@ -467,8 +472,40 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
   // 接続状態（ローカルで管理）
   bool _isConnecting = false;
+  // Change Note #118 v5: 初期接続失敗の履歴として保持する（代入のみ）。
+  // オーバーレイ廃止後は画面表示に使われないため analyzer 警告を抑止する。
+  // ignore: unused_field
   String? _connectionError;
   SshState _sshState = const SshState();
+
+  // 切断/再接続失敗の通知抑制フラグ。初回の切断検知で 1 回だけ通知し、
+  // 真の再接続成功（isConnected）まで再表示しない。リトライサイクルでは
+  // SshState.error が null↔文言 を交互に遷移し、例外種別で文言も変わるため、
+  // 「文言比較 + レート制限」の抑制では同一文言スキップをすり抜けて
+  // 何度も再表示されてしまう（実機検証で確認）。
+  bool _disconnectToastShown = false;
+
+  // 自動再接続待機中のカウントダウン（残り秒・null = 非表示）。待機中は
+  // state 遷移がないため、1 秒周期の Timer でNotifierのみ更新し、
+  // インジケーター部品だけを再構築する（親build()は走らない）。
+  final _reconnectCountdown = ReconnectCountdown();
+
+  // 再接続中パネル（カウントダウン表示タップで開く詳細パネル）。
+  // Fade-in/out で表示し、開いたまま一定時間で自動的に閉じる。
+  bool _reconnectPanelVisible = false;
+  final _reconnectIndicatorKey = GlobalKey();
+  double _reconnectArrowRight = 100;
+  final _headerLink = LayerLink();
+  Timer? _reconnectPanelHideTimer;
+
+  // 通信エラーパネル（切断検知・初期接続エラーで画面下部に表示）。
+  // body は折りたたみ時の本文、detail は「▾」で展開したときの例外詳細。
+  // パネルは × を押すか接続が復帰するまで表示され続ける。
+  String? _commErrorPanelTitle;
+  String? _commErrorPanelBody;
+  String? _commErrorPanelDetail;
+  bool _commErrorPanelExpanded = false;
+  Future<void> Function()? _commErrorPanelOnRetry;
 
   // ポーリングで頻繁に更新されるターミナル表示データ（ValueNotifierで管理）
   // 親のsetState()を回避し、ValueListenableBuilderでサブツリーのみリビルドする
@@ -950,6 +987,46 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       setState(() {
         _sshState = next;
       });
+      // 切断検知 / 再接続失敗の provider error 遷移時に Toast（SnackBar）で
+      // 理由を通知する。初期接続失敗（previous 未接続 かつ isReconnecting=false）
+      // は既存の _showErrorSnackBar（Retry → _connectAndSetup）がカバーするため
+      // 対象外（reviewer 第1回-2）。keep-alive 等の接続中からの切断は
+      // previous.isConnected で判定し、sshConnectionLost の 1 回通知（v5）を維持する。
+      // 初期接続失敗後のインジケーター Retry（reconnectNow）再失敗は前状態が
+      // hasError になるため、previous.hasError で捕捉する（reviewer 第2回-1）。
+      if (previous != null &&
+          previous.error != next.error &&
+          next.error != null &&
+          (previous.isConnected || next.isReconnecting || previous.hasError)) {
+        _showCommErrorPanel(
+          title: previous.isConnected
+              ? context.l10n.termConnectionLostTitle
+              : context.l10n.termReconnectFailedTitle,
+          body: context.l10n.termConnectionLostBody,
+          detail: next.error!,
+          onRetry: () => ref.read(sshProvider.notifier).reconnectNow(),
+        );
+      }
+      // 真の接続回復時（isConnected）のみ抑止状態をリセットする。再接続ループ中は
+      // reconnect() が copyWith の無条件 error 書き込みで error を null クリアする
+      // ため、error == null でリセットすると同一文言の Toast が毎サイクル再表示
+      // されてしまう（reviewer 第1回-1）。
+      if (!next.isReconnecting) {
+        _reconnectPanelVisible = false;
+        _reconnectPanelHideTimer?.cancel();
+      }
+      if (next.isConnected) {
+        // 抑止フラグを解除し（次回切断で再度 1 回通知する）、表示中の
+        // 通信エラーパネルは役目を終えたため自動で閉じる。
+        _disconnectToastShown = false;
+        _closeCommErrorPanel();
+      }
+      // 再接続待機中のカウントダウン表示を同期する。
+      _reconnectCountdown.sync(
+        isReconnecting: next.isReconnecting,
+        isWaitingForNetwork: next.isWaitingForNetwork,
+        nextRetryAt: next.nextRetryAt,
+      );
     }, fireImmediately: true);
 
     // Tmux状態の変化を監視
@@ -1290,7 +1367,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
       final client = sshNotifier.client;
       if (client == null) {
-        throw Exception('SSH client is not available');
+        throw Exception(
+          ref.read(sshProvider).error ?? 'SSH client is not available',
+        );
       }
 
       // モードリセット（接続確立時の scrollSend/select 残留防止・D4）。tmux /
@@ -1490,7 +1569,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         // inventory: TERM-RESIZE-003
         _scheduleInitialAutoResize();
       }
-    } on SshAuthenticationError {
+    } on SshAuthenticationError catch (e) {
       // 注意: SshAuthenticationError 全種をこの文言にマップしている。現在の throw
       // 元は _getAuthOptions の秘密鍵読み取り失敗のみ。将来 throw 元が増える
       // 場合は例外の種別に応じた文言選択が必要。
@@ -1501,7 +1580,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         _connectionError = message;
       });
       // inventory: TERM-DIALOG-001
-      _showErrorSnackBar(message);
+      _showErrorSnackBar(
+        e.toString(),
+        title: context.l10n.termAuthenticationFailedTitle,
+      );
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -2387,17 +2469,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       _updatePollingInterval();
     } catch (e) {
       // A2: herdr は例外種別で分岐（target-not-found 再解決 / server-down
-      // 停止+通知 / その他再接続）。tmux パスは従来挙動を維持する（回帰防止）。
+      // 停止+通知 / その他再接続）。tmux パスは切断検知を Path B（ポーリング
+      // 冒頭の接続確認）へ集約したため、ここでは再接続を試みない（#118）。
       if (_backendKind == MultiplexerBackendKind.herdr) {
         await _handleHerdrPollError(e);
-      } else {
-        // 通信エラーの場合は自動再接続を試みる
-        if (!_isDisposed) {
-          final currentState = ref.read(sshProvider);
-          if (!currentState.isReconnecting) {
-            _attemptReconnect();
-          }
-        }
       }
     } finally {
       _isPolling = false;
@@ -2420,13 +2495,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       await _handleHerdrServerDown(e);
     } else {
       _recordHerdrSwitchEvent('poll error (${e.runtimeType})');
-      // その他の通信エラーは従来どおり自動再接続を試みる
-      if (!_isDisposed) {
-        final currentState = ref.read(sshProvider);
-        if (!currentState.isReconnecting) {
-          _attemptReconnect();
-        }
-      }
+      // その他通信エラー: 切断検知は Path B（ポーリング冒頭の接続確認）へ
+      // 集約したため、ここでは再接続を試みない（#118）。
     }
   }
 
@@ -2932,20 +3002,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       );
       await _handleHerdrServerDown(e);
     } else {
-      // その他通信エラー: 接続断系は既存の自動再接続、それ以外はエラー通知。
+      // その他通信エラー: 接続断系も含め一律エラー通知へ一本化（再接続は
+      // Path B のポーリング検知に集約。空分岐を残さないため条件を削除、#118）。
       _recordHerdrSwitchEvent(
         'mutation $operationLabel: error (${e.runtimeType})',
       );
-      if (e is SshConnectionError) {
-        final currentState = ref.read(sshProvider);
-        if (!currentState.isReconnecting) {
-          _attemptReconnect();
-        }
-      } else {
-        _showHerdrMutationSnackBar(
-          context.l10n.termOperationFailed(operationLabel, e.toString()),
-        );
-      }
+      _showHerdrMutationSnackBar(
+        context.l10n.termOperationFailed(operationLabel, e.toString()),
+      );
     }
   }
 
@@ -3104,21 +3168,16 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }
 
   /// 自動再接続を試みる
+  ///
+  /// 切断検知は Path B（ポーリング冒頭の接続確認）に集約されており、
+  /// ここはそのラッパー（TERM-LIFE-021 依存）。
   Future<void> _attemptReconnect() async {
     if (_isDisposed) return;
 
     final sshNotifier = ref.read(sshProvider.notifier);
-    final success = await sshNotifier.reconnect();
+    await sshNotifier.reconnect();
 
     if (!mounted || _isDisposed) return;
-
-    if (!success) {
-      // 再接続失敗時は再試行（最大回数に達するまで）
-      final currentState = ref.read(sshProvider);
-      if (currentState.reconnectAttempt < 5) {
-        // 次のポーリングで再試行される
-      }
-    }
   }
 
   // inventory: TERM-LIFE-024
@@ -3147,20 +3206,74 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }
 
   /// エラーSnackBar表示
-  void _showErrorSnackBar(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      // inventory: LEGACY-0073
-      SnackBar(
-        content: Text(message),
-        backgroundColor: Colors.red,
-        action: SnackBarAction(
-          label: context.l10n.termRetry,
-          textColor: Colors.white,
-          // inventory: TERM-LIFE-011
-          onPressed: _connectAndSetup,
-        ),
-      ),
+  void _showErrorSnackBar(String message, {String? title}) {
+    _showCommErrorPanel(
+      title: title ?? context.l10n.termConnectionFailedTitle,
+      body: title ?? context.l10n.termConnectionFailedTitle,
+      detail: message,
+      onRetry: _connectAndSetup,
     );
+  }
+
+  /// 切断/再接続失敗の理由を Toast（SnackBar）で通知する。
+  ///
+  /// 再接続ループは 1s→60s の無制限バックオフでリトライし、その間
+  /// [SshState.error] は reconnect() の copyWith で null クリア→失敗で再設定
+  /// を繰り返す。さらに例外種別が変わると文言も変わる。文言や経過時間で
+  /// 抑制するとこの遷移をすり抜けて連続表示になるため、
+  /// **真の再接続成功まで初回 1 回のみ通知**する（[_disconnectToastShown]）。
+  ///
+  /// アクション文言は専用の `termReconnectNow` を使う（`termRetry` を流用すると
+  /// TERM-DIALOG-010 の `find.text('Retry')` findsOneWidget と衝突するため）。
+  /// 通信エラーパネルを表示する。
+  ///
+  /// 画面下部に赤枠のパネルとして表示し、× を押すか接続が復帰するまで
+  /// 表示し続ける（展開アイコンで例外詳細を開閉できる）。リトライサイクル中の
+  /// error null↔文言 遷移や文言ローテーションで連続表示にならないよう、
+  /// **真の再接続成功まで初回 1 回のみ通知**する（[_disconnectToastShown]）。
+  ///
+  /// [body] は展開時の本文、[detail] は展開時に表示する例外詳細、
+  /// [onRetry] は「今すぐ再接続」アクションの処理。
+  void _showCommErrorPanel({
+    required String title,
+    required String body,
+    required String detail,
+    required Future<void> Function() onRetry,
+  }) {
+    if (!mounted || _isDisposed) return;
+
+    // 初回表示以降、真の再接続成功（isConnected 遷移）まで再表示しない
+    if (_disconnectToastShown) {
+      // 表示中は最新の失敗を反映する。閉じたパネルは再表示しない。
+      if (_commErrorPanelBody != null) {
+        setState(() {
+          _commErrorPanelTitle = title;
+          _commErrorPanelBody = body;
+          _commErrorPanelDetail = detail;
+          _commErrorPanelOnRetry = onRetry;
+        });
+      }
+      return;
+    }
+    _disconnectToastShown = true;
+
+    setState(() {
+      _commErrorPanelTitle = title;
+      _commErrorPanelBody = body;
+      _commErrorPanelDetail = detail;
+      _commErrorPanelExpanded = false;
+      _commErrorPanelOnRetry = onRetry;
+    });
+  }
+
+  /// 通信エラーパネルを閉じる（× 押下・接続復帰時）。
+  void _closeCommErrorPanel() {
+    if (!mounted) return;
+    setState(() {
+      _commErrorPanelBody = null;
+      _commErrorPanelDetail = null;
+      _commErrorPanelExpanded = false;
+    });
   }
 
   /// スクロール時にスクロールボタンを表示
@@ -3336,6 +3449,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     // 最小監視（A8）リングバッファを解放
     _herdrSwitchEvents.clear();
     // ValueNotifierを破棄
+    _reconnectPanelHideTimer?.cancel();
+    _reconnectCountdown.dispose();
     _viewNotifier.dispose();
     _herdrDisplayNotifier.dispose();
     _herdrPaneIndicatorNotifier.dispose();
@@ -3370,16 +3485,24 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
               if (_backendKind == MultiplexerBackendKind.herdr)
                 ValueListenableBuilder<_HerdrDisplayData?>(
                   valueListenable: _herdrDisplayNotifier,
-                  builder: (context, display, _) =>
-                      _buildBreadcrumbHeader(_herdrToBreadcrumb(display)),
+                  builder: (context, display, _) => _wrapWithReconnectPanel(
+                    _buildBreadcrumbHeader(_herdrToBreadcrumb(display)),
+                  ),
                 )
               else
                 Consumer(
                   builder: (context, ref, _) {
                     final tmuxState = ref.watch(tmuxProvider);
-                    return _buildBreadcrumbHeader(_tmuxToBreadcrumb(tmuxState));
+                    return _wrapWithReconnectPanel(
+                      _buildBreadcrumbHeader(_tmuxToBreadcrumb(tmuxState)),
+                    );
                   },
                 ),
+              // 切断/再接続/エラー状態をヘッダー直下の赤バーで示す（タップ不可・状態表示専用）。
+              if (_sshState.isReconnecting ||
+                  _sshState.isDisconnected ||
+                  _sshState.hasError)
+                const DisconnectBar(),
               Expanded(
                 child: AnimatedContainer(
                   duration: const Duration(milliseconds: 200),
@@ -3527,6 +3650,58 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                         overlayState: _keyOverlayState,
                         position: _keyOverlayPosition,
                       ),
+                      // 通信エラーパネル（下からスライドしてフェードイン）。
+                      // 切断検知・初期接続エラー時に [_showCommErrorPanel] で表示し、
+                      // × 押下または接続復帰で閉じるまで表示し続ける。
+                      Positioned(
+                        left: 12,
+                        right: 12,
+                        bottom: 64,
+                        child: ConstrainedBox(
+                          constraints: BoxConstraints(
+                            maxHeight: MediaQuery.sizeOf(context).height * 0.35,
+                          ),
+                          child: AnimatedSwitcher(
+                            duration: const Duration(milliseconds: 250),
+                            switchInCurve: Curves.easeOutCubic,
+                            switchOutCurve: Curves.easeInCubic,
+                            layoutBuilder: (currentChild, previousChildren) =>
+                                Stack(
+                                  alignment: Alignment.bottomCenter,
+                                  children: [
+                                    ...previousChildren,
+                                    ?currentChild,
+                                  ],
+                                ),
+                            transitionBuilder: (child, animation) =>
+                                FadeTransition(
+                                  opacity: animation,
+                                  child: SlideTransition(
+                                    position: Tween<Offset>(
+                                      begin: const Offset(0, 0.3),
+                                      end: Offset.zero,
+                                    ).animate(animation),
+                                    child: child,
+                                  ),
+                                ),
+                            child: _commErrorPanelBody != null
+                                ? CommErrorPanel(
+                                    title: _commErrorPanelTitle ?? '',
+                                    body: _commErrorPanelBody ?? '',
+                                    detail: _commErrorPanelDetail ?? '',
+                                    expanded: _commErrorPanelExpanded,
+                                    onToggleExpanded: () => setState(
+                                      () => _commErrorPanelExpanded =
+                                          !_commErrorPanelExpanded,
+                                    ),
+                                    onRetry: () =>
+                                        _commErrorPanelOnRetry?.call(),
+                                    onClose: _closeCommErrorPanel,
+                                  )
+                                : const SizedBox(width: double.infinity),
+                          ),
+                        ),
+                      ),
                     ],
                   ),
                 ),
@@ -3596,10 +3771,44 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
               color: isDark ? Colors.black54 : Colors.white70,
               child: const Center(child: CircularProgressIndicator()),
             ),
-          // エラーオーバーレイ
-          if (_connectionError != null || sshState.hasError)
-            // inventory: TERM-DIALOG-007
-            _buildErrorOverlay(sshState.error ?? _connectionError),
+          Positioned(
+            top: 0,
+            right: 0,
+            child: CompositedTransformFollower(
+              link: _headerLink,
+              targetAnchor: Alignment.bottomRight,
+              followerAnchor: Alignment.topRight,
+              offset: const Offset(-16, 2),
+              child: IgnorePointer(
+                ignoring: !_reconnectPanelVisible || !_sshState.isReconnecting,
+                child: AnimatedSwitcher(
+                  key: const ValueKey('reconnect_tooltip_transition'),
+                  duration: const Duration(milliseconds: 250),
+                  switchInCurve: Curves.easeOut,
+                  switchOutCurve: Curves.easeIn,
+                  layoutBuilder: (currentChild, previousChildren) => Stack(
+                    alignment: Alignment.topRight,
+                    children: [...previousChildren, ?currentChild],
+                  ),
+                  child: _reconnectPanelVisible && _sshState.isReconnecting
+                      ? ReconnectDetailPanel(
+                          key: const ValueKey('reconnect_details'),
+                          countdown: _reconnectCountdown.remaining,
+                          attempt: _sshState.reconnectAttempt,
+                          visible: true,
+                          arrowRight: _reconnectArrowRight,
+                          width: (MediaQuery.sizeOf(context).width - 32).clamp(
+                            0,
+                            264,
+                          ),
+                        )
+                      : const SizedBox.shrink(
+                          key: ValueKey('reconnect_details_hidden'),
+                        ),
+                ),
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -4339,107 +4548,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         a.frameHeight == b.frameHeight;
   }
 
-  /// エラーオーバーレイ
-  Widget _buildErrorOverlay(String? error) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    final colorScheme = Theme.of(context).colorScheme;
-    final queuedCount = _inputQueue.length;
-    final isWaitingForNetwork = _sshState.isWaitingForNetwork;
-
-    return Container(
-      color: isDark ? Colors.black87 : Colors.white.withValues(alpha: 0.95),
-      child: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              isWaitingForNetwork ? Icons.signal_wifi_off : Icons.error_outline,
-              color: isWaitingForNetwork
-                  ? DesignColors.warning
-                  : colorScheme.error,
-              size: 48,
-            ),
-            // inventory: LEGACY-0074
-            const SizedBox(height: 16),
-            // inventory: LEGACY-0090
-            Text(
-              isWaitingForNetwork
-                  ? context.l10n.termWaitingForNetwork
-                  : (error ?? context.l10n.termConnectionError),
-              style: TextStyle(color: colorScheme.onSurface),
-              textAlign: TextAlign.center,
-            ),
-
-            // キューイング状態
-            if (queuedCount > 0) ...[
-              const SizedBox(height: 12),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 6,
-                ),
-                decoration: BoxDecoration(
-                  color: DesignColors.primary.withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.keyboard, size: 16, color: DesignColors.primary),
-                    const SizedBox(width: 8),
-                    Text(
-                      context.l10n.termCharsQueued(queuedCount),
-                      style: TextStyle(
-                        color: DesignColors.primary,
-                        fontSize: 12,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    GestureDetector(
-                      onTap: () {
-                        _inputQueue.clear();
-                        setState(() {});
-                      },
-                      child: Icon(
-                        Icons.clear,
-                        size: 16,
-                        color: DesignColors.primary.withValues(alpha: 0.7),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-
-            const SizedBox(height: 16),
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                ElevatedButton(
-                  onPressed: () {
-                    ref.read(sshProvider.notifier).reconnectNow();
-                  },
-                  child: Text(context.l10n.termRetryNow),
-                ),
-                if (_sshState.isReconnecting) ...[
-                  const SizedBox(width: 12),
-                  SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: colorScheme.primary,
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
   /// 上部のパンくずナビゲーションヘッダー（A9）。
   ///
   /// [data] は backend 経路ごとに生成済みの共通データ（`_tmuxToBreadcrumb` /
@@ -4581,7 +4689,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                 constraints: const BoxConstraints(),
                 tooltip: context.l10n.termFileBrowser,
               ),
-            // Settings button
             IconButton(
               // inventory: TERM-DIALOG-002
               onPressed: _showTerminalMenu,
@@ -4598,6 +4705,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         ),
       ),
     );
+  }
+
+  /// 画面前面の再接続詳細パネルをヘッダー下端に追従させる。
+  Widget _wrapWithReconnectPanel(Widget header) {
+    return CompositedTransformTarget(link: _headerLink, child: header);
   }
 
   /// tmux 経路: [TmuxState] をブレッドクラム描画用データへ変換する（A9）。
@@ -7288,8 +7400,20 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       ),
       child: _sshState.isReconnecting
           // inventory: TERM-DIALOG-010
-          ? _buildReconnectingIndicator()
-          : _buildLatencyIndicator(latency),
+          ? ReconnectingIndicator(
+              key: _reconnectIndicatorKey,
+              countdown: _reconnectCountdown.remaining,
+              isWaitingForNetwork: _sshState.isWaitingForNetwork,
+              attempt: _sshState.reconnectAttempt,
+              onTap: _toggleReconnectPanel,
+            )
+          : _sshState.isConnected
+          ? _buildLatencyIndicator(latency)
+          : DisconnectedIndicator(
+              queuedCount: _inputQueue.length,
+              onReconnectNow: () =>
+                  ref.read(sshProvider.notifier).reconnectNow(),
+            ),
     );
   }
 
@@ -7329,112 +7453,29 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     );
   }
 
-  /// 再接続中インジケーター
-  Widget _buildReconnectingIndicator() {
-    final attempt = _sshState.reconnectAttempt;
-    final isWaitingForNetwork = _sshState.isWaitingForNetwork;
-    final nextRetryAt = _sshState.nextRetryAt;
-    final queuedCount = _inputQueue.length;
-
-    // 次回リトライまでの秒数を計算
-    // inventory: LEGACY-0077
-    String? countdownText;
-    if (nextRetryAt != null && !isWaitingForNetwork) {
-      final remaining = nextRetryAt.difference(DateTime.now()).inSeconds;
-      if (remaining > 0) {
-        countdownText = '${remaining}s';
-      }
+  /// 再接続詳細パネルの開閉トグル。開いたまま 10 秒で自動的に閉じる。
+  void _toggleReconnectPanel() {
+    final box =
+        _reconnectIndicatorKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box != null) {
+      final center = box.localToGlobal(Offset(box.size.width / 2, 0));
+      _reconnectArrowRight =
+          (MediaQuery.sizeOf(context).width - 16 - center.dx - 7).clamp(
+            12,
+            238,
+          );
     }
-
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        // スピナーまたは圏外アイコン
-        if (isWaitingForNetwork)
-          Icon(
-            Icons.signal_wifi_off,
-            size: 12,
-            color: DesignColors.warning.withValues(alpha: 0.8),
-          )
-        else
-          SizedBox(
-            width: 10,
-            height: 10,
-            child: CircularProgressIndicator(
-              strokeWidth: 1.5,
-              color: DesignColors.warning.withValues(alpha: 0.8),
-            ),
-          ),
-        const SizedBox(width: 6),
-
-        // ステータステキスト
-        Text(
-          isWaitingForNetwork
-              ? context.l10n.termOffline
-              : context.l10n.termReconnecting +
-                    (attempt > 1 ? ' ($attempt)' : ''),
-          style: GoogleFonts.jetBrainsMono(
-            fontSize: 10,
-            color: DesignColors.warning.withValues(alpha: 0.8),
-          ),
-        ),
-
-        // カウントダウン
-        if (countdownText != null) ...[
-          const SizedBox(width: 4),
-          Text(
-            countdownText,
-            style: GoogleFonts.jetBrainsMono(
-              fontSize: 9,
-              color: DesignColors.textMuted,
-            ),
-          ),
-        ],
-
-        // キューイング状態
-        if (queuedCount > 0) ...[
-          const SizedBox(width: 8),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-            decoration: BoxDecoration(
-              color: DesignColors.primary.withValues(alpha: 0.2),
-              borderRadius: BorderRadius.circular(4),
-            ),
-            child: Text(
-              context.l10n.termChars(queuedCount),
-              style: GoogleFonts.jetBrainsMono(
-                fontSize: 9,
-                color: DesignColors.primary,
-              ),
-            ),
-          ),
-        ],
-
-        // 今すぐ再接続ボタン
-        const SizedBox(width: 8),
-        GestureDetector(
-          onTap: () {
-            ref.read(sshProvider.notifier).reconnectNow();
-          },
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-            decoration: BoxDecoration(
-              border: Border.all(
-                color: DesignColors.warning.withValues(alpha: 0.5),
-              ),
-              borderRadius: BorderRadius.circular(4),
-            ),
-            child: Text(
-              context.l10n.termRetry,
-              style: GoogleFonts.jetBrainsMono(
-                fontSize: 9,
-                color: DesignColors.warning,
-              ),
-            ),
-          ),
-        ),
-      ],
-    );
+    setState(() {
+      _reconnectPanelVisible = !_reconnectPanelVisible;
+      _reconnectPanelHideTimer?.cancel();
+      if (_reconnectPanelVisible) {
+        _reconnectPanelHideTimer = Timer(const Duration(seconds: 10), () {
+          if (mounted && _reconnectPanelVisible) {
+            setState(() => _reconnectPanelVisible = false);
+          }
+        });
+      }
+    });
   }
 
   /// キーを PaneWriter 経由で送信（T8）
