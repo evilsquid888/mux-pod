@@ -373,8 +373,7 @@ class SshClient implements BackendAdapter {
     }
   }
 
-  void _onAuthenticated() {
-  }
+  void _onAuthenticated() {}
 
   // inventory: SSH-027
   // inventory: LEGACY-0151
